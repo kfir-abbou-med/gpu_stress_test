@@ -158,8 +158,11 @@ class GPUStressTestProcessor:
         except Exception as e:
             print(f"Error: {e}")
         finally:
-            cap.release()
-            out.release()
+            try:
+                cap.release()
+                out.release()
+            except Exception as e:
+                print(e)
 
         total_time = time.time() - self.start_time
         print(f"\n=== Processing Complete ===")
@@ -169,7 +172,7 @@ class GPUStressTestProcessor:
 
 def main():
     processor = GPUStressTestProcessor()
-    processor.process_video("./videos/4k.mov", "./output/output.mp4")
+    processor.process_video("./videos/fire.mp4", "./output/output.mp4")
 
 if __name__ == "__main__":
     main()
