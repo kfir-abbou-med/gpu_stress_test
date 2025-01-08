@@ -6,123 +6,129 @@ from torch import nn
 import torch.nn.functional as F
 from datetime import datetime
 
-class LightModel(nn.Module):
+class AggressiveModel(nn.Module):
     def __init__(self, input_size):
-        super(LightModel, self).__init__()
-        self.conv1 = nn.Conv3d(1, 8, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv3d(8, 16, kernel_size=3, padding=1)
-        self.fc = nn.Linear(16 * (input_size//4)**3, (input_size//2)**3)
-    
-    def forward(self, x):
-        x = F.max_pool3d(F.relu(self.conv1(x)), 2)
-        x = F.max_pool3d(F.relu(self.conv2(x)), 2)
-        x = x.view(x.size(0), -1)
-        return self.fc(x)
-
-class MediumModel(nn.Module):
-    def __init__(self, input_size):
-        super(MediumModel, self).__init__()
+        super(AggressiveModel, self).__init__()
+        # More complex architecture with more layers
         self.conv1 = nn.Conv3d(1, 16, kernel_size=3, padding=1)
         self.conv2 = nn.Conv3d(16, 32, kernel_size=3, padding=1)
-        self.fc = nn.Linear(32 * (input_size//4)**3, (input_size//2)**3)
+        self.conv3 = nn.Conv3d(32, 64, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm3d(16)
+        self.bn2 = nn.BatchNorm3d(32)
+        self.bn3 = nn.BatchNorm3d(64)
+        
+        # Dynamically calculate the flattened size
+        test_input = torch.zeros(1, 1, input_size, input_size, input_size)
+        with torch.no_grad():
+            x = F.max_pool3d(self.bn1(F.relu(self.conv1(test_input))), 2)
+            x = F.max_pool3d(self.bn2(F.relu(self.conv2(x))), 2)
+            x = F.max_pool3d(self.bn3(F.relu(self.conv3(x))), 2)
+            flattened_size = x.view(1, -1).size(1)
+        
+        self.fc1 = nn.Linear(flattened_size, 512)
+        self.fc2 = nn.Linear(512, input_size**3 // 4)
+        self.dropout = nn.Dropout(0.3)
     
     def forward(self, x):
-        x = F.max_pool3d(F.relu(self.conv1(x)), 2)
-        x = F.max_pool3d(F.relu(self.conv2(x)), 2)
+        x = F.max_pool3d(self.bn1(F.relu(self.conv1(x))), 2)
+        x = F.max_pool3d(self.bn2(F.relu(self.conv2(x))), 2)
+        x = F.max_pool3d(self.bn3(F.relu(self.conv3(x))), 2)
         x = x.view(x.size(0), -1)
-        return self.fc(x)
+        x = self.dropout(F.relu(self.fc1(x)))
+        return self.fc2(x)
 
-def get_gpu_info():
-    """Get GPU information"""
-    try:
-        gpus = GPUtil.getGPUs()
-        if gpus:
-            gpu = gpus[0]
-            return f"{gpu.name} - Memory: {gpu.memoryTotal}MB"
-        return "No GPU detected"
-    except:
-        return "Unable to get GPU information"
-
-def run_benchmark(input_sizes=[16, 32], batch_sizes=[1, 2], num_iterations=5):
-    """Run benchmark and return summary statistics"""
+def adaptive_memory_benchmark(max_input_size=128, max_batch_size=8):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"\nRunning benchmark on: {device}")
-    print(f"GPU: {get_gpu_info()}")
+    print(f"\nRunning Adaptive Memory Benchmark on: {device}")
     
-    total_time = 0
-    total_fps = 0
-    test_count = 0
-    benchmark_start = time.time()
+    # Get GPU memory details
+    if torch.cuda.is_available():
+        total_memory = torch.cuda.get_device_properties(0).total_memory
+        print(f"Total GPU Memory: {total_memory / (1024**3):.2f} GB")
     
-    models = {
-        'Light': LightModel,
-        'Medium': MediumModel
-    }
+    # Adaptive benchmark parameters
+    results = []
+    current_input_size = 16
+    current_batch_size = 1
     
-    for model_name, model_class in models.items():
-        for input_size in input_sizes:
-            for batch_size in batch_sizes:
-                try:
-                    print(f"\nTesting {model_name} - Input size: {input_size}, Batch: {batch_size}")
-                    
-                    # Initialize model and data
-                    model = model_class(input_size).to(device)
-                    input_data = torch.randn(batch_size, 1, input_size, input_size, input_size).to(device)
-                    
-                    # Warm-up
-                    for _ in range(2):
-                        model(input_data)
-                    
-                    # Benchmark
+    while current_input_size <= max_input_size:
+        while current_batch_size <= max_batch_size:
+            try:
+                # Memory management
+                torch.cuda.empty_cache()
+                
+                # Create model and input
+                model = AggressiveModel(current_input_size).to(device).half()
+                input_data = torch.randn(
+                    current_batch_size, 1, current_input_size, 
+                    current_input_size, current_input_size, 
+                    dtype=torch.half, device=device
+                )
+                
+                # Check memory usage
+                memory_allocated = torch.cuda.memory_allocated(device)
+                memory_cached = torch.cuda.memory_reserved(device)
+                print(f"\nTest Configuration:")
+                print(f"Input Size: {current_input_size}")
+                print(f"Batch Size: {current_batch_size}")
+                print(f"Memory Allocated: {memory_allocated / (1024**2):.2f} MB")
+                print(f"Memory Cached: {memory_cached / (1024**2):.2f} MB")
+                
+                # Warm-up
+                for _ in range(3):
+                    with torch.no_grad():
+                        output = model(input_data)
+                
+                # Benchmark
+                torch.cuda.synchronize()
+                start_time = time.time()
+                
+                iterations = 10
+                for _ in range(iterations):
+                    with torch.no_grad():
+                        output = model(input_data)
                     torch.cuda.synchronize()
-                    start_time = time.time()
-                    
-                    for _ in range(num_iterations):
-                        model(input_data)
-                        torch.cuda.synchronize()
-                    
-                    end_time = time.time()
-                    test_time = end_time - start_time
-                    avg_time = test_time / num_iterations
-                    fps = 1.0 / avg_time
-                    
-                    # Add to totals
-                    total_time += test_time
-                    total_fps += fps
-                    test_count += 1
-                    
-                    # Clean up
-                    del model, input_data
-                    torch.cuda.empty_cache()
-                    
-                except RuntimeError as e:
-                    print(f"Error: {e}")
-                    torch.cuda.empty_cache()
-                    continue
+                
+                end_time = time.time()
+                
+                # Calculate performance metrics
+                total_time = end_time - start_time
+                avg_time = total_time / iterations
+                fps = 1.0 / avg_time if avg_time > 0 else float('inf')
+                
+                # Store results
+                results.append({
+                    'input_size': current_input_size,
+                    'batch_size': current_batch_size,
+                    'avg_time': avg_time,
+                    'fps': fps,
+                    'memory_allocated': memory_allocated
+                })
+                
+                print(f"Performance: {fps:.2f} FPS")
+                print(f"Average Time: {avg_time*1000:.2f} ms")
+                
+            except RuntimeError as e:
+                print(f"Memory Error: {e}")
+                break
+            except Exception as e:
+                print(f"Unexpected Error: {e}")
+                break
+            
+            # Increment batch size
+            current_batch_size *= 2
+        
+        # Reset batch size and increment input size
+        current_batch_size = 1
+        current_input_size *= 2
     
-    benchmark_end = time.time()
-    total_benchmark_time = benchmark_end - benchmark_start
-    
-    return {
-        'total_benchmark_time': total_benchmark_time,
-        'average_fps': total_fps / test_count if test_count > 0 else 0,
-        'tests_completed': test_count
-    }
+    # Print detailed results
+    print("\n=== Benchmark Results ===")
+    for result in results:
+        print(f"Input Size: {result['input_size']}, "
+              f"Batch Size: {result['batch_size']}, "
+              f"FPS: {result['fps']:.2f}, "
+              f"Avg Time: {result['avg_time']*1000:.2f} ms")
 
 if __name__ == "__main__":
-    # Run benchmark
-    print("Starting GPU Benchmark...")
-    print("=" * 50)
-    
-    results = run_benchmark(
-        input_sizes=[64, 128],  # Test with these input sizes
-        batch_sizes=[4, 8],    # Test with these batch sizes
-        num_iterations=5       # Number of iterations per test
-    )
-    
-    print("\nFinal Results:")
-    print("=" * 50)
-    print(f"Total Benchmark Time: {results['total_benchmark_time']:.2f} seconds")
-    print(f"Average FPS: {results['average_fps']:.2f}")
-    print(f"Tests Completed: {results['tests_completed']}")
-    print("=" * 50)
+    adaptive_memory_benchmark(max_input_size=128, max_batch_size=16)
